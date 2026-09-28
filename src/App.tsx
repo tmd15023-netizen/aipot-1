@@ -20,6 +20,8 @@ import { allBooks, getFile, putBook, removeBook, sortBooks, storageIsMemory, upd
 import type { BookRecord, ReaderSettings } from './types.ts'
 
 const SETTINGS_KEY = 'seojae-settings'
+const BUNDLED_PDF = `${import.meta.env.BASE_URL}book.pdf`
+const BUNDLED_COVER = `${import.meta.env.BASE_URL}cover.jpg`
 
 function loadSettings(): ReaderSettings {
   try {
@@ -58,6 +60,8 @@ export default function App() {
   const passwordInput = useRef<HTMLInputElement>(null)
   const finishPassword = useRef<((value: string | null) => void) | null>(null)
   const dragTimer = useRef(0)
+  const importOneRef = useRef<(file: File, coverFile?: File) => Promise<void>>(async () => {})
+  const [booting, setBooting] = useState(true)
 
   booksRef.current = books
 
@@ -96,20 +100,51 @@ export default function App() {
 
   useEffect(() => {
     let alive = true
-    void allBooks().then(async (rows) => {
-      if (!alive) return
-      const sorted = sortBooks(rows)
-      const keep = sorted[0]
-      if (sorted.length > 1) {
-        await Promise.all(sorted.slice(1).map((item) => removeBook(item.id)))
+    void (async () => {
+      try {
+        let rows = sortBooks(await allBooks())
+        if (rows.length > 1) {
+          await Promise.all(rows.slice(1).map((item) => removeBook(item.id)))
+          rows = rows[0] ? [rows[0]] : []
+        }
+        if (!rows[0]) {
+          setBusy(true)
+          setStatus('책을 준비하고 있습니다…')
+          const pdfRes = await fetch(BUNDLED_PDF)
+          if (!pdfRes.ok) throw new Error('bundled pdf')
+          const pdfBlob = await pdfRes.blob()
+          const coverRes = await fetch(BUNDLED_COVER)
+          const coverBlob = coverRes.ok ? await coverRes.blob() : null
+          const pdfFile = new File([pdfBlob], 'AI-POT 1급.pdf', { type: 'application/pdf' })
+          const coverFile = coverBlob
+            ? new File([coverBlob], '1급표지.jpg', { type: 'image/jpeg' })
+            : undefined
+          await importOneRef.current(pdfFile, coverFile)
+          rows = booksRef.current
+        }
+        if (!alive) return
+        const book = rows[0]
+        setBooks(book ? [book] : [])
+        if (!book) return
+        const file = await getFile(book.id)
+        if (!alive || !file) {
+          if (!file) onToast('저장된 PDF를 찾을 수 없습니다.')
+          return
+        }
+        setBlob(file)
+        setReading(book)
+        if (storageIsMemory()) onToast('이 브라우저에 저장할 수 없어, 탭을 닫으면 책이 사라집니다.')
+      } catch (err) {
+        console.error(err)
+        if (alive) onToast('책을 불러오지 못했습니다.')
+      } finally {
+        if (alive) {
+          setBusy(false)
+          setStatus('')
+          setBooting(false)
+        }
       }
-      if (!alive) return
-      setBooks(keep ? [keep] : [])
-      if (storageIsMemory()) onToast('이 브라우저에 저장할 수 없어, 탭을 닫으면 책이 사라집니다.')
-    }).catch((err) => {
-      console.error(err)
-      onToast('책을 불러오지 못했습니다.')
-    })
+    })()
     return () => { alive = false }
   }, [onToast])
 
@@ -225,6 +260,8 @@ export default function App() {
     }
   }
 
+  importOneRef.current = importOne
+
   async function setCover(id: string, file: File) {
     const book = booksRef.current.find((item) => item.id === id)
     if (!book) return
@@ -321,15 +358,21 @@ export default function App() {
 
   return (
     <>
-      <Library
-        books={books}
-        busy={busy}
-        status={status}
-        onUpload={(files) => void addFiles(files)}
-        onOpen={(id, page) => void openBook(id, page)}
-        onDelete={(id) => void deleteBook(id)}
-        onCover={(id, file) => void setCover(id, file)}
-      />
+      {booting ? (
+        <div className="wrap">
+          <p className="lede">책을 열고 있습니다…</p>
+        </div>
+      ) : (
+        <Library
+          books={books}
+          busy={busy}
+          status={status}
+          onUpload={(files) => void addFiles(files)}
+          onOpen={(id, page) => void openBook(id, page)}
+          onDelete={(id) => void deleteBook(id)}
+          onCover={(id, file) => void setCover(id, file)}
+        />
+      )}
       {reading && blob && (
         <Reader
           key={reading.id}
